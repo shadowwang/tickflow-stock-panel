@@ -34,14 +34,20 @@
 
 <table>
   <tr>
-    <td width="33.33%" align="center"><b>看板 Dashboard</b></td>
-    <td width="33.33%" align="center"><b>选股 Screener</b></td>
-    <td width="33.33%" align="center"><b>回测 Backtest</b></td>
+    <td width="50%" align="center"><b>看板 Dashboard</b></td>
+    <td width="50%" align="center"><b>选股 Screener</b></td>
   </tr>
   <tr>
-    <td width="33.33%"><img src="./docs/screenshots/dashboard.png" alt="看板页面" title="看板页面"></td>
-    <td width="33.33%"><img src="./docs/screenshots/screener.png" alt="选股/策略页" title="选股/策略页"></td>
-    <td width="33.33%"><img src="./docs/screenshots/backtest.png" alt="回测页" title="回测页"></td>
+    <td width="50%"><img src="./docs/screenshots/dashboard.png" alt="看板页面" title="看板页面"></td>
+    <td width="50%"><img src="./docs/screenshots/screener.png" alt="选股/策略页" title="选股/策略页"></td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><b>回测 Backtest</b></td>
+    <td width="50%" align="center"><b>连板梯队 Limit Ladder</b></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="./docs/screenshots/backtest.png" alt="回测页" title="回测页"></td>
+    <td width="50%"><img src="./docs/screenshots/limit-ladder.png" alt="连板梯队页" title="连板梯队页"></td>
   </tr>
 </table>
 

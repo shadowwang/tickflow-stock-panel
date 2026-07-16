@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import analysis, auth as auth_api, backtest, data, ext_data, financials, indices, intraday, kline, market_recap, monitor_rules, alerts, overview, pipeline, rps, screener, settings as settings_api, signals, stock_analysis, strategy, watchlist
+from app.api import analysis, auth as auth_api, backtest, data, ext_data, financials, indices, intraday, kline, logs, market_recap, monitor_rules, alerts, overview, pipeline, rps, screener, settings as settings_api, signals, stock_analysis, strategy, watchlist
 from app.api.routes import router as core_router
 from app.config import settings
 from app.jobs import daily_pipeline
@@ -30,6 +30,14 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 日志环形缓冲: 必须在 lifespan 启动里注册, 而非 main 模块顶部。
+    # 原因: uvicorn 启动时会用 dictConfig 覆盖 root logger 的 handlers,
+    # 在 main 顶层 addHandler 会被冲掉; lifespan 跑在 uvicorn 配置之后, 能存活。
+    # 同步挂到 uvicorn 日志器: 否则 uvicorn 自身的 access/error 因 propagate=False 漏掉。
+    from app.services.log_buffer import log_buffer
+    for _name in ("", "uvicorn", "uvicorn.error", "uvicorn.access"):
+        logging.getLogger(_name).addHandler(log_buffer.handler)
+
     logger.info(
         "TickFlow Stock Panel v%s starting (mode=%s)",
         __version__, tf_client.current_mode(),
@@ -340,6 +348,7 @@ app.include_router(pipeline.router)
 app.include_router(data.router)
 app.include_router(ext_data.router)
 app.include_router(financials.router)
+app.include_router(logs.router)
 app.include_router(stock_analysis.router)
 app.include_router(market_recap.router)
 app.include_router(settings_api.router)

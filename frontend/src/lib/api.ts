@@ -57,6 +57,24 @@ export interface FinancialStatus {
   syncing?: boolean
 }
 
+// ===== Logs (服务端运行日志查看器) =====
+export interface LogEntry {
+  ts: string
+  level: string
+  logger: string
+  /** 链路: "module:lineno" 或 "–" */
+  path: string
+  message: string
+}
+
+export interface LogSnapshot {
+  entries: LogEntry[]
+  /** 缓冲总条数 (可能大于已加载数) */
+  total: number
+  /** 是否还有更旧的条目未加载 */
+  has_more: boolean
+}
+
 export interface FinancialMetricRecord {
   symbol?: string
   period_end: string
@@ -1667,6 +1685,13 @@ export const api = {
 
   financialReportDelete: (reportId: string) =>
     request<{ ok: boolean }>(`/api/financials/reports/${encodeURIComponent(reportId)}`, { method: 'DELETE' }),
+
+  // ===== Logs (服务端运行日志查看器) =====
+  logsGet: (offset = 0, limit = 200) =>
+    request<LogSnapshot>(`/api/logs?offset=${offset}&limit=${limit}`),
+
+  logsClear: () =>
+    request<{ ok: boolean; removed: number }>('/api/logs/clear', { method: 'POST' }),
 
   /**
    * AI 财务分析 — 流式调用。

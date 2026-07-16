@@ -9,6 +9,7 @@ import { AiAnalysisHost } from '@/components/financials/AiAnalysisHost'
 import { AiReportBubble } from '@/components/financials/AiReportBubble'
 import { StockAnalysisHost } from '@/components/stock-analysis/StockAnalysisHost'
 import { StockAnalysisBubble } from '@/components/stock-analysis/StockAnalysisBubble'
+import { LogViewerDialog } from '@/components/LogViewerDialog'
 import {
   useCapabilities,
   useSettings,
@@ -46,6 +47,7 @@ import {
   Moon,
   X,
   WifiOff,
+  ScrollText,
 } from 'lucide-react'
 import { Logo } from './Logo'
 import { api, type IndexQuote } from '@/lib/api'
@@ -322,6 +324,8 @@ export function Layout() {
   const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false
   // Free 档监控限制提示: 可手动关闭, 不持久化 (刷新后恢复显示)
   const [dismissFreeHint, setDismissFreeHint] = useState(false)
+  // 日志查看器弹窗: 设置旁的图标按钮触发
+  const [logsOpen, setLogsOpen] = useState(false)
   const indicesPinned = prefs?.indices_nav_pinned ?? true
   const sidebarIndexSymbols = prefs?.sidebar_index_symbols ?? CORE_INDEXES.map(p => p.symbol)
   const sidebarIndexes = CORE_INDEXES.filter(item => sidebarIndexSymbols.includes(item.symbol))
@@ -636,6 +640,14 @@ export function Layout() {
         <div className="border-t border-border px-2 py-3 shrink-0">
           <div className="flex items-center gap-1">
             <ThemeToggle />
+            <button
+              onClick={() => setLogsOpen(true)}
+              title="查看服务端运行日志"
+              aria-label="查看服务端运行日志"
+              className="flex items-center justify-center rounded-btn p-2 text-foreground/80 transition-colors duration-150 ease-smooth hover:bg-elevated hover:text-foreground cursor-pointer"
+            >
+              <ScrollText className="h-4 w-4 shrink-0" />
+            </button>
             <NavLink
               to="/settings"
               className={({ isActive }) =>
@@ -691,6 +703,7 @@ export function Layout() {
       <AiReportBubble />
       <StockAnalysisHost />
       <StockAnalysisBubble />
+      <LogViewerDialog open={logsOpen} onClose={() => setLogsOpen(false)} />
     </div>
   )
 }

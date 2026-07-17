@@ -8,7 +8,7 @@ import { cn } from '@/lib/cn'
 import { MarkdownRenderer } from '@/components/financials/MarkdownRenderer'
 import {
   type ActiveTask, type HistoryReport,
-  minimizeDialog, closeDialog, startAnalysis,
+  minimizeDialog, closeDialog, startAnalysis, stripThinking,
 } from '@/lib/stockAnalysisStore'
 
 /**
@@ -45,8 +45,9 @@ export function StockAnalysisDialog({ task, mode, minimized }: Props) {
 
   const phase = getPhase(task)
   const content = getContent(task)
-  const meta = getMeta(task)
   const isHistory = mode === 'history'
+  const displayContent = isHistory ? stripThinking(content) : content
+  const meta = getMeta(task)
   const isWorking = phase === 'loading' || phase === 'streaming'
   const open = !!task && !minimized
 
@@ -67,9 +68,9 @@ export function StockAnalysisDialog({ task, mode, minimized }: Props) {
   }, [task, focus])
 
   const handleCopy = async () => {
-    if (!content) return
+    if (!displayContent) return
     try {
-      await navigator.clipboard.writeText(content)
+      await navigator.clipboard.writeText(displayContent)
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     } catch { /* ignore */ }
@@ -182,9 +183,9 @@ export function StockAnalysisDialog({ task, mode, minimized }: Props) {
               </div>
             )}
 
-            {(content || phase === 'streaming') && (
+            {(displayContent || phase === 'streaming') && (
               <div className="relative">
-                <MarkdownRenderer content={content} />
+                <MarkdownRenderer content={displayContent} />
                 {phase === 'streaming' && (
                   <span className="inline-block w-1.5 h-3.5 bg-sky-400 ml-0.5 align-middle animate-pulse rounded-sm" />
                 )}

@@ -11,8 +11,10 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
+import re
 from datetime import date, timedelta
 
 import polars as pl
@@ -216,3 +218,136 @@ def delete_report(request: Request, report_id: str):
     """删除一条报告。"""
     ok = stock_reports.delete_report(report_id)
     return {"ok": ok}
+
+
+# ================================================================
+# 轻量 AI 技术面倾向判断(非买卖建议)
+# ================================================================
+
+# 仅保留对"倾向判断"有用的列, 控制上下文体积
+_SUGGEST_KEEP_COLS = [
+    "date", "open", "high", "low", "close", "volume", "change_pct",
+    "ma5", "ma20", "ma60",
+    "macd_dif", "macd_dea", "macd_hist",
+    "kdj_k", "kdj_d", "kdj_j",
+    "rsi_6", "rsi_14", "rsi_24",
+    "boll_upper", "boll_mid", "boll_lower",
+    "atr_14", "vol_ratio_5d", "turnover_rate",
+]
+
+# 红线: 与项目 _SYSTEM_PROMPT 一致, 只描述技术面倾向, 不输出任何买卖/操作建议
+_SUGGEST_SYSTEM = """你是一位严谨的 A 股技术分析师。基于提供的个股日 K 数据(含 OHLCV 与已计算的技术指标)和关键价位摘要,对该股当前技术面状态给出客观倾向判断。
+
+严格要求:
+- 只输出一个 JSON 对象,不要输出任何额外文字、Markdown 或代码块。
+- JSON 结构: {"direction": "偏多" | "偏空" | "中性", "confidence": 0-100 的整数, "reason": "一句话技术面理由(引用具体指标数值,如 MACD 金叉/RSI 超买/站上 20 日线)"}
+- direction 含义: 偏多=技术形态偏强势; 偏空=技术形态偏弱; 中性=方向不明朗。
+- 绝对不输出任何买卖建议、操作指令或仓位建议,只做客观技术面倾向描述。
+- confidence 表示你对该倾向判断的把握程度(0-100 整数)。
+
+现在请基于下方数据判断。"""
+
+_SUGGEST_USER = """标的标准代码: {symbol}
+关键价位概览: {summary}
+最近 {n} 个交易日日 K 数据(JSON,升序):
+```json
+{kline}
+```
+请输出 JSON。"""
+
+
+def _suggest_rows(df: pl.DataFrame, cols: list[str], n: int) -> list[dict]:
+    """取尾部 N 行并序列化为 JSON 安全的 dict 列表(date→str, NaN→None)。"""
+    import datetime as _dt
+    keep = [c for c in cols if c in df.columns]
+    sub = df.select(keep).tail(n)
+    if "date" in keep:
+        sub = sub.with_columns(pl.col("date").cast(pl.Utf8).alias("date"))
+    rows: list[dict] = []
+    for rec in sub.to_dicts():
+        clean: dict = {}
+        for k, v in rec.items():
+            if isinstance(v, float):
+                clean[k] = None if not math.isfinite(v) else round(v, 4)
+            elif isinstance(v, (_dt.date, _dt.datetime)):
+                clean[k] = v.isoformat()
+            else:
+                clean[k] = v
+        rows.append(clean)
+    return rows
+
+
+def _parse_suggest_json(text: str) -> dict:
+    """从 AI 返回中容错解析 {direction, confidence, reason}。"""
+    s = (text or "").strip()
+    m = re.search(r"\{.*\}", s, re.DOTALL)
+    if not m:
+        return {"direction": "中性", "confidence": 0, "reason": (s[:200] or "AI 未返回有效结果")}
+    try:
+        obj = json.loads(m.group(0))
+    except Exception:
+        return {"direction": "中性", "confidence": 0, "reason": (s[:200] or "AI 返回无法解析")}
+    direction = str(obj.get("direction", "中性"))
+    if direction not in ("偏多", "偏空", "中性"):
+        direction = "中性"
+    try:
+        confidence = int(round(float(obj.get("confidence", 0))))
+    except Exception:
+        confidence = 0
+    confidence = max(0, min(100, confidence))
+    reason = str(obj.get("reason", "")).strip()
+    return {"direction": direction, "confidence": confidence, "reason": reason}
+
+
+@router.get("/suggest")
+async def suggest_stock(
+    request: Request,
+    symbol: str = Query(..., description="标的代码, 如 000001.SZ"),
+):
+    """轻量 AI 技术面倾向判断(非买卖建议)。
+
+    取最近 120 天日 K → 计算关键价位摘要 + 尾部指标 → 构造"技术面倾向"提示词
+    → 调 stream_ai_text 取全文 → 解析 JSON {direction, confidence, reason}。
+    返回结构: {symbol, direction, confidence, reason}。
+    AI 未配置或失败时返回中性 + 说明, 不抛 500。
+    """
+    if not symbol:
+        raise HTTPException(400, "symbol 不能为空")
+
+    repo = request.app.state.repo
+    end = date.today()
+    start = end - timedelta(days=120)
+    df = repo.get_daily_asset(repo.resolve_asset_type(symbol), symbol, start, end)
+    if df.is_empty():
+        return {"symbol": symbol, "direction": "中性", "confidence": 0, "reason": "暂无日 K 数据"}
+
+    levels = compute_levels(df)
+    close = float(df.tail(1)["close"][0]) if "close" in df.columns else None
+    summary = summarize_levels(levels, close)
+    kline_tail = _suggest_rows(df, _SUGGEST_KEEP_COLS, 45)
+
+    from app.services.ai_provider import ai_configured, stream_ai_text
+    if not ai_configured():
+        return {"symbol": symbol, "direction": "中性", "confidence": 0, "reason": "AI 未配置,无法生成建议"}
+
+    user_prompt = _SUGGEST_USER.format(
+        symbol=symbol, summary=summary, n=len(kline_tail), kline=json.dumps(kline_tail, ensure_ascii=False),
+    )
+    try:
+        parts: list[str] = []
+        async for delta in stream_ai_text(
+            [
+                {"role": "system", "content": _SUGGEST_SYSTEM},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+            max_tokens=800,
+        ):
+            parts.append(delta)
+        result = _parse_suggest_json("".join(parts))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("suggest failed for %s: %s", symbol, e)
+        result = {"direction": "中性", "confidence": 0, "reason": f"AI 建议生成失败: {e}"}
+
+    result["symbol"] = symbol
+    return result

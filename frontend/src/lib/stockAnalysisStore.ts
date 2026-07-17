@@ -14,6 +14,17 @@ import { api, type PriceLevel, type LevelType } from './api'
 
 export type Phase = 'loading' | 'streaming' | 'done' | 'error'
 
+/**
+ * 过滤模型思考链标签 <thinking>...</think> 之间的内容(仅影响展示,不改动存储)。
+ */
+export function stripThinking(content: string): string {
+  if (!content) return content
+  return content
+    .replace(/<thinking>[\s\S]*?<\/think>/gi, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
 export interface ActiveTask {
   id: string
   symbol: string

@@ -223,6 +223,25 @@ export interface KlineRow {
   [key: string]: any
 }
 
+// ===== 洞察卡片(自选预览弹窗) =====
+export interface InsightNewsItem {
+  source: string
+  external_id: string
+  title: string
+  content: string
+  publish_time: string
+  symbols: string[]
+  importance: number
+  url: string
+}
+
+export interface StockSuggestResult {
+  symbol: string
+  direction: '偏多' | '偏空' | '中性'
+  confidence: number
+  reason: string
+}
+
 // ===== Watchlist =====
 export interface WatchlistEntry {
   symbol: string
@@ -1770,6 +1789,15 @@ export const api = {
 
   stockAnalysisReportDelete: (reportId: string) =>
     request<{ ok: boolean }>(`/api/stock-analysis/reports/${encodeURIComponent(reportId)}`, { method: 'DELETE' }),
+
+  // ===== 洞察卡片(自选预览弹窗) =====
+  insightsNews: (symbol: string, name?: string, limit = 20) =>
+    request<{ items: InsightNewsItem[] }>(
+      `/api/insights/news?symbol=${encodeURIComponent(symbol)}&limit=${limit}${name ? `&name=${encodeURIComponent(name)}` : ''}`,
+    ),
+
+  stockSuggest: (symbol: string) =>
+    request<StockSuggestResult>(`/api/stock-analysis/suggest?symbol=${encodeURIComponent(symbol)}`),
 
   /**
    * AI 个股四维分析 — 流式调用(NDJSON,与财务分析同协议)。

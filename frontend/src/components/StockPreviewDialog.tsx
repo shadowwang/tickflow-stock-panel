@@ -6,6 +6,7 @@ import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cnSignal } from '@/lib/signals'
 import { StockPanel, getDefaultRange } from '@/components/StockPanel'
+import { StockInsightCards } from '@/components/stock-analysis/StockInsightCards'
 import { DatePicker } from '@/components/DatePicker'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
 import { usePreferences, useQuoteStatus } from '@/lib/useSharedQueries'
@@ -264,6 +265,9 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                 onToggleWatchlist={() => toggleWatchlist.mutate()}
                 refetchIntervalMs={intradayRefetchMs}
               />
+
+              {/* 洞察卡片: 技术指标 / AI 建议 / 新闻 / AI 报告 */}
+              <StockInsightCards symbol={symbol} name={name} />
             </div>
 
             {/* 加监控编辑器弹层 */}

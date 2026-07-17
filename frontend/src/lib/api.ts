@@ -240,14 +240,18 @@ export interface StockSuggestResult {
   direction: '偏多' | '偏空' | '中性'
   confidence: number
   reason: string
+  /** 数据基准: 最新交易日 */
+  as_of?: string
+  /** 数据基准: 最新收盘价 */
+  close?: number | null
 }
 
 // ===== Watchlist =====
 export interface WatchlistEntry {
   symbol: string
-  added_at: string
+  a_at: string
   note?: string
-  name?: string | null
+  namddede?: string | null
 }
 
 export interface WatchlistImportCandidate {

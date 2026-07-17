@@ -277,16 +277,26 @@ def _suggest_rows(df: pl.DataFrame, cols: list[str], n: int) -> list[dict]:
     return rows
 
 
+def _strip_think(text: str) -> str:
+    """剥除思考链标签内容: 兼容 <think>/<thinking>, 闭合或未闭合(截断)。"""
+    return re.sub(
+        r"<think(?:ing)?>.*?(?:</think(?:ing)?>|\Z)",
+        "",
+        text or "",
+        flags=re.DOTALL | re.IGNORECASE,
+    ).strip()
+
+
 def _parse_suggest_json(text: str) -> dict:
     """从 AI 返回中容错解析 {direction, confidence, reason}。"""
-    s = (text or "").strip()
+    s = _strip_think(text)
     m = re.search(r"\{.*\}", s, re.DOTALL)
     if not m:
-        return {"direction": "中性", "confidence": 0, "reason": (s[:200] or "AI 未返回有效结果")}
+        return {"direction": "中性", "confidence": 0, "reason": "AI 未返回有效判断"}
     try:
         obj = json.loads(m.group(0))
     except Exception:
-        return {"direction": "中性", "confidence": 0, "reason": (s[:200] or "AI 返回无法解析")}
+        return {"direction": "中性", "confidence": 0, "reason": "AI 返回无法解析"}
     direction = str(obj.get("direction", "中性"))
     if direction not in ("偏多", "偏空", "中性"):
         direction = "中性"
@@ -341,7 +351,7 @@ async def suggest_stock(
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.3,
-            max_tokens=800,
+            max_tokens=4000,  # 思考类模型会先消耗大量 token 推理, 需预留 JSON 输出空间
         ):
             parts.append(delta)
         result = _parse_suggest_json("".join(parts))

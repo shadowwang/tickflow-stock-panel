@@ -399,7 +399,11 @@ class QuoteService:
     def realtime_mode(cls) -> str:
         """当前实时行情模式: none / watchlist / full_market。"""
         from app.services import preferences
-        if preferences.get_realtime_data_provider() != "tickflow":
+        rt_provider = preferences.get_realtime_data_provider()
+        if rt_provider == "tencent":
+            # 腾讯免费源: 仅自选模式 (防限流), 且解锁 none/free 档
+            return "watchlist"
+        if rt_provider != "tickflow":
             return "full_market"
         tier = cls._current_tier()
         if tier == "none":
@@ -717,32 +721,84 @@ class QuoteService:
         self._evaluate_monitors(daily_df, quote_extra)
 
     def _fetch_watchlist_quotes(self) -> None:
-        """Free 档自选股实时: 只拉取最多 5 个 symbols。"""
+        """自选股实时: 港美股强制腾讯免费源, A股跟随选项卡 (腾讯/ TickFlow)。"""
         from app.services import preferences
-        from app.tickflow.client import get_paid_realtime_client
+        from app.data_providers.tencent_provider import is_overseas
 
         symbols = preferences.get_realtime_watchlist_symbols()
         if not symbols:
             logger.info("自选实时未配置标的, 跳过行情拉取")
             return
 
-        tf = get_paid_realtime_client()
-        if tf is None:
-            logger.warning("自选实时拉取失败:未配置付费服务器 API Key")
+        rt_provider = preferences.get_realtime_data_provider()
+        overseas = [s for s in symbols if is_overseas(s)]
+        local = [s for s in symbols if not is_overseas(s)]
+
+        records: list[dict] = []
+        if overseas:
+            records.extend(self._fetch_tencent_watchlist(overseas))
+        if local:
+            if rt_provider == "tencent":
+                records.extend(self._fetch_tencent_watchlist(local))
+            else:
+                records.extend(self._fetch_tickflow_watchlist(local))
+
+        if not records:
+            logger.warning("自选实时行情数据为空")
             return
 
         t0 = time.perf_counter()
         now_ts = time.perf_counter()
+        fetch_ms = (time.perf_counter() - t0) * 1000
+        fetched_at = time.time() * 1000
+        with self._lock:
+            self._fetch_time = now_ts
+            self._fetch_ms = fetch_ms
+            self._fetched_at = fetched_at
+            self._symbol_count = len(records)
+            self._index_symbol_count = 0
+            self._etf_symbol_count = 0
+            self._index_quotes_cache = None
+
+        _persist_last_fetch(fetched_at)
+        logger.info("自选实时刷新: %d 只股票, 耗时 %.0fms", len(records), fetch_ms)
+
+        daily_df = self._build_daily(records)
+        quote_extra = self._build_quote_extra(records)
+        if not daily_df.is_empty() and self._repo:
+            try:
+                self._repo.merge_live_daily_asset("stock", daily_df)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("自选实时日K写盘失败: %s", e)
+            self._flush_live_enriched(daily_df, quote_extra, asset_type="stock", merge=True)
+
+        self._broadcast_quote_updated()
+        self._evaluate_monitors(daily_df, quote_extra)
+
+    def _fetch_tencent_watchlist(self, symbols: list[str]) -> list[dict]:
+        from app.data_providers import registry
+        try:
+            provider = registry.get_provider("tencent")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("腾讯自选实时初始化失败: %s", e)
+            return []
+        try:
+            return provider.get_realtime(symbols=symbols) or []
+        except Exception as e:  # noqa: BLE001
+            logger.warning("腾讯自选实时拉取失败: %s", e)
+            return []
+
+    def _fetch_tickflow_watchlist(self, symbols: list[str]) -> list[dict]:
+        from app.tickflow.client import get_paid_realtime_client
+        tf = get_paid_realtime_client()
+        if tf is None:
+            logger.warning("自选实时拉取失败:未配置付费服务器 API Key")
+            return []
         try:
             resp = tf.quotes.get(symbols=symbols) or []
         except Exception as e:  # noqa: BLE001
             logger.warning("自选实时拉取失败: %s", e)
-            return
-
-        if not resp:
-            logger.warning("自选实时行情数据为空")
-            return
-
+            return []
         records = []
         for q in resp:
             ext = q.get("ext") or {}
@@ -772,32 +828,7 @@ class QuoteService:
                 "timestamp": q.get("timestamp"),
                 "session": q.get("session"),
             })
-
-        fetch_ms = (time.perf_counter() - t0) * 1000
-        fetched_at = time.time() * 1000
-        with self._lock:
-            self._fetch_time = now_ts
-            self._fetch_ms = fetch_ms
-            self._fetched_at = fetched_at
-            self._symbol_count = len(records)
-            self._index_symbol_count = 0
-            self._etf_symbol_count = 0
-            self._index_quotes_cache = None
-
-        _persist_last_fetch(fetched_at)
-        logger.info("自选实时刷新: %d 只股票, 耗时 %.0fms", len(records), fetch_ms)
-
-        daily_df = self._build_daily(records)
-        quote_extra = self._build_quote_extra(records)
-        if not daily_df.is_empty() and self._repo:
-            try:
-                self._repo.merge_live_daily_asset("stock", daily_df)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("自选实时日K写盘失败: %s", e)
-            self._flush_live_enriched(daily_df, quote_extra, asset_type="stock", merge=True)
-
-        self._broadcast_quote_updated()
-        self._evaluate_monitors(daily_df, quote_extra)
+        return records
 
     # ================================================================
     # 工具
@@ -970,6 +1001,7 @@ class QuoteService:
             enriched_today, enriched_date = self.get_enriched_today()
             if enriched_today.is_empty():
                 return
+
             # 快照日期必须是北京当日: 节假日或数据未刷新时 enriched_date 会落后于当日,
             # 说明市场未在交易 → 跳过。无需维护 A股交易日历即可挡住节假日与陈旧价告警。
             if enriched_date != cn_today():

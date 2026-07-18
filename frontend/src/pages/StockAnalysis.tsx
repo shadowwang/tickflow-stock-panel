@@ -95,7 +95,7 @@ export function StockAnalysis() {
         {/* 搜索栏 */}
         <div className="flex items-center gap-3">
           <div className="w-72">
-            <StockFinancialSearch onSelect={onSelect} />
+            <StockFinancialSearch onSelect={onSelect} assetTypes="stock,etf,hk,us" />
           </div>
           {symbol && (
             <>
@@ -211,6 +211,8 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
   const prev = rows[rows.length - 2]
   const curClose = levelsQ.data?.close
   const isUp = prev ? (last.close >= prev.close) : (last.close >= last.open)
+  // 港/美股币种标注,避免与 A 股 CNY 混淆
+  const currency = symbol.endsWith('.HK') ? 'HKD' : symbol.endsWith('.US') ? 'USD' : null
 
   return (
     <div className="rounded-card border border-border/60 bg-surface/40 overflow-hidden">
@@ -223,7 +225,7 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
           <div className="flex items-baseline gap-2 shrink-0">
             <span className="text-[10px] text-muted">{rows.length} 个交易日</span>
             <span className="text-[10px] text-muted/60">·</span>
-            <span className="text-[10px] text-muted">当前价</span>
+            <span className="text-[10px] text-muted">当前价{currency && <span className="ml-1 text-amber-400/80">{currency}</span>}</span>
             <span className={`text-base font-mono font-bold ${isUp ? 'text-bull' : 'text-bear'}`}>
               {curClose?.toFixed(2) ?? '—'}
             </span>

@@ -37,6 +37,18 @@ def _atomic_write_parquet(df: pl.DataFrame, out) -> None:
     tmp.replace(out)  # 同目录 rename, POSIX/NTFS 均为原子操作
 
 
+def _refresh_daily_view(repo: KlineRepository) -> None:
+    """刷新 kline_daily DuckDB 视图 (落盘后调用)。"""
+    try:
+        d = repo.store.data_dir.as_posix()
+        repo.db.execute(
+            f"""CREATE OR REPLACE VIEW kline_daily AS
+                SELECT * FROM read_parquet('{d}/kline_daily/**/*.parquet', union_by_name=true)"""
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("refresh view failed: %s", e)
+
+
 # 标准列(无论 SDK 返回什么形状,我们把它规范成这套)
 CANONICAL_DAILY_COLS = [
     "symbol", "date", "open", "high", "low", "close", "volume", "amount",
@@ -167,33 +179,49 @@ def sync_and_persist_daily_batch(
     if not symbols:
         return 0
 
-    provider_name = preferences.get_daily_data_provider()
-    if provider_name != "tickflow":
-        from app.data_providers import custom as custom_sources
-        if custom_sources.provider_has_dataset(provider_name, "daily"):
-            provider = custom_sources.get_provider(provider_name)
+    from app.data_providers import resolve_provider
+    from app.data_providers.tencent_provider import is_overseas
+
+    # 港美股强制走腾讯免费源 (与 A股选项卡解耦)
+    overseas = [s for s in symbols if is_overseas(s)]
+    local = [s for s in symbols if not is_overseas(s)]
+
+    written = 0
+    if overseas:
+        tencent = resolve_provider("tencent")
+        if tencent is not None:
             end_time = end_date or datetime.now()
             days = count or 365
             start_time = start_date or (end_time - timedelta(days=days))
-            df = provider.get_daily(
-                symbols,
-                start_time=start_time,
-                end_time=end_time,
-                on_chunk_done=on_chunk_done,
+            df_o = tencent.get_daily(
+                overseas, start_time=start_time, end_time=end_time, on_chunk_done=on_chunk_done,
             )
-            if df.is_empty():
-                return 0
-            repo.append_daily(df)
-            try:
-                d = repo.store.data_dir.as_posix()
-                repo.db.execute(
-                    f"""CREATE OR REPLACE VIEW kline_daily AS
-                        SELECT * FROM read_parquet('{d}/kline_daily/**/*.parquet', union_by_name=true)"""
-                )
-            except Exception as e:  # noqa: BLE001
-                logger.warning("refresh view failed: %s", e)
-            return df.height
-        # 自定义源未配置 daily → 回退 TickFlow
+            if not df_o.is_empty():
+                repo.append_daily(df_o)
+                _refresh_daily_view(repo)
+                written += df_o.height
+
+    if not local:
+        return written
+
+    provider_name = preferences.get_daily_data_provider()
+    provider = resolve_provider(provider_name)
+    if provider is not None and provider.name != "tickflow" and getattr(provider.capabilities, "daily", False):
+        end_time = end_date or datetime.now()
+        days = count or 365
+        start_time = start_date or (end_time - timedelta(days=days))
+        df = provider.get_daily(
+            local,
+            start_time=start_time,
+            end_time=end_time,
+            on_chunk_done=on_chunk_done,
+        )
+        if df.is_empty():
+            return written
+        repo.append_daily(df)
+        _refresh_daily_view(repo)
+        return written + df.height
+    # 否则回退 TickFlow 全市场批量
 
     if not capset.has(Cap.KLINE_DAILY_BATCH):
         return 0
@@ -204,26 +232,18 @@ def sync_and_persist_daily_batch(
     start_time = start_date or (end_time - timedelta(days=365))
 
     df = sync_daily_batch(
-        symbols, count=count, batch_size=limit.batch, rpm=limit.rpm,
+        local, count=count, batch_size=limit.batch, rpm=limit.rpm,
         start_time=start_time, end_time=end_time,
         on_chunk_done=on_chunk_done,
     )
 
     if df.is_empty():
-        return 0
+        return written
 
     repo.append_daily(df)
+    _refresh_daily_view(repo)
 
-    try:
-        d = repo.store.data_dir.as_posix()
-        repo.db.execute(
-            f"""CREATE OR REPLACE VIEW kline_daily AS
-                SELECT * FROM read_parquet('{d}/kline_daily/**/*.parquet', union_by_name=true)"""
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.warning("refresh view failed: %s", e)
-
-    return df.height
+    return written + df.height
 
 
 def sync_daily_by_quotes(repo: KlineRepository) -> int:
@@ -333,6 +353,9 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
     provider_name = preferences.get_adj_factor_provider()
     if provider_name == "same_as_daily":
         provider_name = preferences.get_daily_data_provider()
+    if provider_name == "tencent":
+        # 腾讯 qfq 日K 已含复权, 无需独立复权因子
+        return 0, []
     if provider_name != "tickflow":
         from app.data_providers import custom as custom_sources
         if custom_sources.provider_has_dataset(provider_name, "adj_factor"):

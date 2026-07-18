@@ -34,22 +34,46 @@ def search_instruments(
     request: Request,
     q: str = Query("", min_length=0, max_length=50, description="搜索关键词"),
     limit: int = Query(20, ge=1, le=50),
-    asset_types: str = Query("stock", description="逗号分隔的资产类型: stock,etf"),
+    asset_types: str = Query("stock", description="逗号分隔的资产类型: stock,etf,hk,us"),
 ):
-    """模糊搜索标的 (代码 / 名称)。从内存 instruments 缓存中查。
+    """模糊搜索标的 (代码 / 名称)。
 
-    默认只搜股票, 保持既有调用方行为不变; 自选等场景传 asset_types=stock,etf
-    可一并搜出 ETF, 结果附带 asset_type 字段供前端区分。
+    本地 instruments 缓存 (A股/ETF) + 腾讯联想搜索 (覆盖 A/港/美) 合并返回。
+    结果附带 asset_type 字段供前端区分; 港美股 asset_type 为 stock_hk / stock_us。
     """
     if not q.strip():
         return {"results": []}
 
-    repo = request.app.state.repo
-    import polars as pl
+    local = _search_local_instruments(request.app.state.repo, q, asset_types, limit)
 
+    # 腾讯联想搜索 (覆盖港/美/A, 免费)
+    tencent_hits: list[dict] = []
+    try:
+        from app.data_providers import registry
+        tp = registry.get_provider("tencent")
+        tencent_hits = tp.search_instruments(q, limit) or []
+    except Exception as e:  # noqa: BLE001
+        logger.warning("腾讯联想搜索失败: %s", e)
+
+    # 合并去重 (本地优先)
+    seen: set[str] = set()
+    merged: list[dict] = []
+    for r in local + tencent_hits:
+        sym = r.get("symbol")
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+        merged.append(r)
+    return {"results": merged[:limit]}
+
+
+def _search_local_instruments(repo, q: str, asset_types: str, limit: int) -> list[dict]:
+    """原本地 instruments 缓存模糊搜索 (A股/ETF/指数)。"""
+    import polars as pl
     types = [t.strip() for t in asset_types.split(",") if t.strip()]
+    local_types = [t for t in types if t in ("stock", "etf", "index")]
     parts: list[pl.DataFrame] = []
-    for t in types:
+    for t in local_types:
         df_t = repo.get_instruments_asset(t)
         if df_t.is_empty() or "symbol" not in df_t.columns:
             continue
@@ -61,7 +85,7 @@ def search_instruments(
             pl.lit(t).alias("asset_type"),
         ]).select(["symbol", "name", "code", "asset_type"]))
     if not parts:
-        return {"results": []}
+        return []
     df = pl.concat(parts, how="vertical")
 
     keyword = q.strip().upper()
@@ -87,8 +111,7 @@ def search_instruments(
         prefix_symbols = set(prefix_hits["symbol"].to_list()) if not prefix_hits.is_empty() else set()
         contain_hits = df.filter(contains_mask & ~pl.col("symbol").is_in(prefix_symbols)).head(remaining)
         matched = pl.concat([prefix_hits, contain_hits]) if not prefix_hits.is_empty() else contain_hits
-    rows = matched.select(["symbol", "name", "code", "asset_type"]).to_dicts()
-    return {"results": rows}
+    return matched.select(["symbol", "name", "code", "asset_type"]).to_dicts()
 
 
 @router.post("/instruments/names")

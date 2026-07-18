@@ -60,6 +60,14 @@ def _resolve_universe(capset: CapabilitySet) -> list[str]:
     有 batch 能力 → 直接拉 CN_Equity_A universe
     其他用户 → 用 instruments parquet + watchlist 兜底
     """
+    from app.services import preferences
+    if preferences.get_daily_data_provider() == "tencent":
+        # 腾讯免费源逐标的 + 限流, 仅同步自选 (含港美股) + demo, 不解析全市场 A股池
+        base: set[str] = set(DEMO_SYMBOLS)
+        base.update(get_pool("watchlist"))
+        logger.info("腾讯源标的池: 仅自选 + demo (%d 只)", len(base))
+        return sorted(base)
+
     if capset.has(Cap.KLINE_DAILY_BATCH):
         try:
             all_a = get_pool("CN_Equity_A", refresh=True)

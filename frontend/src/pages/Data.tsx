@@ -170,6 +170,21 @@ export function Data() {
     ? 'TickFlow'
     : (dataSources.data?.custom?.find(s => s.name === activeProvider)?.display_name || activeProvider)
 
+  // 数据源选项卡: TickFlow / 腾讯财经（免费）一键切换
+  const updateProviders = useMutation({
+    mutationFn: (cfg: {
+      daily_data_provider?: string
+      adj_factor_provider?: string
+      minute_data_provider?: string
+      realtime_data_provider?: string
+      financial_data_provider?: string
+    }) => api.updateDataProviders(cfg),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: QK.preferences })
+      qc.invalidateQueries({ queryKey: QK.dataStatus })
+    },
+  })
+
   // tierKey → 自定义数据集名映射 (用于数据画像 CapBadge 显示数据源名而非 TickFlow 档位)
   const TIERKEY_TO_DATASET: Record<string, string> = {
     daily: 'daily',
@@ -591,6 +606,28 @@ export function Data() {
                 <SlidersHorizontal className="h-3.5 w-3.5" />
                 页面设置
               </button>
+              {/* 数据源选项卡: TickFlow / 腾讯财经（免费） */}
+              <div className="flex flex-col items-end gap-1">
+                <div className="inline-flex items-center rounded-btn border border-border bg-elevated p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => updateProviders.mutate({ daily_data_provider: 'tickflow', realtime_data_provider: 'tickflow', adj_factor_provider: 'tickflow', minute_data_provider: 'tickflow', financial_data_provider: 'tickflow' })}
+                    className={`px-2.5 py-1 rounded-btn text-xs transition-colors duration-150 ${activeProvider === 'tickflow' ? 'bg-accent/15 text-accent' : 'text-secondary hover:bg-elevated'}`}
+                  >
+                    TickFlow
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => updateProviders.mutate({ daily_data_provider: 'tencent', realtime_data_provider: 'tencent', adj_factor_provider: 'same_as_daily', minute_data_provider: 'tickflow', financial_data_provider: 'tickflow' })}
+                    className={`px-2.5 py-1 rounded-btn text-xs transition-colors duration-150 ${activeProvider === 'tencent' ? 'bg-accent/15 text-accent' : 'text-secondary hover:bg-elevated'}`}
+                  >
+                    腾讯财经（免费）
+                  </button>
+                </div>
+                {activeProvider === 'tencent' && (
+                  <span className="text-[11px] text-muted">免费源覆盖实时 / 日K / 搜索，分钟K 与财务仍由 TickFlow 提供</span>
+                )}
+              </div>
               <div className="w-px h-4 bg-border" />
               <Link
                 to="/settings?tab=data-sources"

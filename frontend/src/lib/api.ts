@@ -442,6 +442,7 @@ export interface StrategyDetail {
   scoring: Record<string, number>
   entry_signals: string[]
   exit_signals: string[]
+  minute_exit_trigger_supported_signals: string[]
   stop_loss: number | null
   take_profit: number | null
   trailing_stop: number | null
@@ -534,6 +535,7 @@ export interface MonitorRule {
   webhook_enabled?: boolean  // 兼容老规则, 已由 webhook_channels 取代
   webhook_channels?: string[]  // 命中时推送的外部渠道 (合法值 'feishu' | 'wecom')
   created_at?: string
+  runtime_warning?: string
   // ladder 专属: 封单监控
   metric?: 'sealed_vol' | 'sealed_amount'  // 量(手) / 额(元)
   threshold?: number                        // 封单 <= 此值时报警
@@ -549,6 +551,12 @@ export interface MonitorRuleOptions {
   logics: { key: string; label: string }[]
   severities: { key: string; label: string }[]
   directions: { key: string; label: string }[]
+  intraday_signal_support: {
+    available: boolean
+    source: string | null
+    max_symbols: number
+    reason: string
+  }
 }
 
 export interface AlertEvent {
@@ -591,6 +599,8 @@ export interface LimitLadderStock {
   sealed_status?: 'real' | 'fake' | 'pending' | null
   /** 封单量(买一/卖一量), 仅真封板有值 */
   sealed_vol?: number | null
+  /** 最终状态为涨跌停且当天开高低收四价相同 */
+  is_one_word?: boolean
 }
 
 export interface LimitLadderTier {
@@ -1487,7 +1497,7 @@ export const api = {
     overrides?: Record<string, any> | null
     matching?: 'close_t' | 'open_t+1'
     entry_fill?: 'close_t' | 'open_t+1' | null
-    exit_fill?: 'close_t' | 'open_t+1' | null
+    exit_fill?: 'close_t' | 'open_t+1' | 'signal_next_minute' | null
     fees_pct?: number
     commission_pct?: number
     stamp_tax_pct?: number
@@ -1496,6 +1506,7 @@ export const api = {
     initial_capital?: number
     position_sizing?: 'equal' | 'score_weight'
     asset_type?: 'stock' | 'etf'
+    minute_fill?: boolean
   }) =>
     request<StrategyBacktestResult>('/api/backtest/strategy/run', {
       method: 'POST',
@@ -1558,6 +1569,13 @@ export const api = {
     if (opts?.columns?.length) qs.set('columns', opts.columns.join(','))
     const suffix = qs.toString()
     return request<ExtDataRowsResult>(`/api/ext-data/${encodeURIComponent(id)}/rows${suffix ? `?${suffix}` : ''}`)
+  },
+
+  dimensionMembers: (id: string, opts: { field: string; value: string; date?: string; limit?: number }) => {
+    const qs = new URLSearchParams({ field: opts.field, value: opts.value })
+    if (opts.date) qs.set('date', opts.date)
+    if (opts.limit) qs.set('limit', String(opts.limit))
+    return request<DimensionMembersResult>(`/api/ext-data/${encodeURIComponent(id)}/dimension-members?${qs.toString()}`)
   },
 
   analysisMenus: () =>
@@ -2330,6 +2348,17 @@ export interface ExtDataRowsResult {
   total: number
   limit: number
   fields: ExtDataField[]
+  rows: Record<string, any>[]
+}
+
+export interface DimensionMembersResult {
+  id: string
+  label: string
+  date: string | null
+  field: string
+  value: string
+  total: number
+  limit: number
   rows: Record<string, any>[]
 }
 

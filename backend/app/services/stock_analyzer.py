@@ -48,6 +48,18 @@ def _load_kline(repo, symbol: str) -> pl.DataFrame:
     # 按资产类型分流: ETF/指数走独立 enriched 存储 (无财务数据, 提示词已有兜底)
     df = repo.get_daily_asset(repo.resolve_asset_type(symbol), symbol, start, end)
     if df.is_empty():
+        # 本地无日 K (港美股无缓存 / Free 用户未同步) → 实时拉取 + 算指标,
+        # 与 /api/stock-analysis/suggest 的回退逻辑保持一致
+        # (港美股由 sync_daily_batch 走腾讯免费源)。
+        try:
+            from app.services import kline_sync
+            from app.indicators.pipeline import compute_enriched
+            raw = kline_sync.sync_daily_batch([symbol], count=150)
+            if not raw.is_empty():
+                df = compute_enriched(raw, factors=pl.DataFrame())
+        except Exception as e:  # noqa: BLE001
+            logger.warning("AI分析 日K回退拉取失败 %s: %s", symbol, e)
+    if df.is_empty():
         return df
     return df.tail(_KLINE_WINDOW)
 

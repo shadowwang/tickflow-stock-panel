@@ -331,6 +331,17 @@ async def suggest_stock(
     start = end - timedelta(days=120)
     df = repo.get_daily_asset(repo.resolve_asset_type(symbol), symbol, start, end)
     if df.is_empty():
+        # 本地无日 K (港美股无缓存 / Free 用户未同步) → 实时拉取 + 算指标,
+        # 与 /api/kline/daily 的回退逻辑保持一致 (港美股由 sync_daily_batch 走腾讯免费源)。
+        try:
+            from app.services import kline_sync
+            from app.indicators.pipeline import compute_enriched
+            raw = kline_sync.sync_daily_batch([symbol], count=150)
+            if not raw.is_empty():
+                df = compute_enriched(raw, factors=pl.DataFrame())
+        except Exception as e:  # noqa: BLE001
+            logger.warning("suggest 日K回退拉取失败 %s: %s", symbol, e)
+    if df.is_empty():
         return {"symbol": symbol, "direction": "中性", "confidence": 0, "reason": "暂无日 K 数据"}
 
     levels = compute_levels(df)

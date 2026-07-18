@@ -160,6 +160,37 @@ _WATCHLIST_COLS = [
 ]
 
 
+# ── 港美股日 K 缓存 (进程内 TTL, 避免每次请求都网络拉取) ──
+_OVERSEAS_DAILY_CACHE: dict[str, tuple[float, "pl.DataFrame"]] = {}
+_OVERSEAS_DAILY_TTL = 600.0  # 秒
+
+
+def _get_overseas_daily(symbols: list[str]) -> "pl.DataFrame":
+    """拉取港美股日 K (腾讯免费源) 并带进程内 TTL 缓存。
+
+    返回规范化日 K (symbol/date/open/high/low/close/volume/amount);
+    空 DataFrame 表示拉取失败或无数据。
+    """
+    if not symbols:
+        return pl.DataFrame()
+    cache_key = ",".join(sorted(symbols))
+    now = time.perf_counter()
+    cached = _OVERSEAS_DAILY_CACHE.get(cache_key)
+    if cached is not None and (now - cached[0]) < _OVERSEAS_DAILY_TTL:
+        return cached[1]
+    from datetime import datetime, timedelta
+    from app.data_providers.tencent_provider import TencentProvider
+    end = datetime.now()
+    start = end - timedelta(days=400)  # 覆盖 ~250 交易日 + 余量
+    try:
+        df = TencentProvider().get_daily(symbols, start_time=start, end_time=end)
+    except Exception:  # noqa: BLE001
+        logger.warning("港美股日K拉取失败, 降级无指标", exc_info=True)
+        df = pl.DataFrame()
+    _OVERSEAS_DAILY_CACHE[cache_key] = (now, df)
+    return df
+
+
 @router.get("/enriched")
 def watchlist_enriched(
     request: Request,
@@ -213,11 +244,32 @@ def watchlist_enriched(
             df_etf = etf_watchlist_df
         df = df_etf if df.is_empty() else pl.concat([df, df_etf], how="diagonal_relaxed")
 
-    # 海外标的 (HK/US): enriched 缓存不含此类标的, 用腾讯实时接口补基础行情
-    df_overseas: pl.DataFrame | None = None
+    # 海外标的 (HK/US): enriched 缓存不含此类标的。
+    # 用腾讯日 K 计算技术指标/信号 (涨跌停信号因港美股无涨跌停机制不计算),
+    # 再用实时接口补实时价 + 名称。
     if overseas_symbols:
         try:
             from app.data_providers.tencent_provider import TencentProvider
+            from app.indicators.pipeline import compute_indicators, compute_signals
+
+            # 1) 日 K → 指标 → 纯价格信号, 取每个 symbol 最新一天
+            daily_ov = _get_overseas_daily(overseas_symbols)
+            df_ind: pl.DataFrame | None = None
+            if not daily_ov.is_empty():
+                df_ind = compute_indicators(daily_ov)
+                df_ind = compute_signals(df_ind)
+                # 仅保留 symbol + 指标/信号列, 丢弃原始 OHLCV (避免与实时快照列冲突)
+                _drop = {"date", "open", "high", "low", "close", "volume", "amount"}
+                _ind_cols = [c for c in df_ind.columns if c not in _drop and c != "symbol"]
+                df_ind = (
+                    df_ind.sort(["symbol", "date"])
+                    .group_by("symbol", maintain_order=True)
+                    .last()
+                    .select(["symbol"] + _ind_cols)
+                )
+
+            # 2) 实时快照补实时价 + 名称
+            df_rt: pl.DataFrame | None = None
             rt_records = TencentProvider().get_realtime(symbols=overseas_symbols)
             if rt_records:
                 _rt_rows = []
@@ -233,15 +285,17 @@ def watchlist_enriched(
                         "amplitude": r.get("amplitude"),
                         "volume": r.get("volume"),
                     })
-                df_overseas = pl.DataFrame(_rt_rows)
-        except Exception:  # noqa: BLE001
-            logger.debug("海外标的事实时行情获取失败, 降级为空行", exc_info=True)
+                df_rt = pl.DataFrame(_rt_rows)
 
-    if df_overseas is not None and not df_overseas.is_empty():
-        # 以自选列表为主表, 保证每个海外标的都有一行
-        ov_watchlist_df = pl.DataFrame({"symbol": overseas_symbols})
-        df_ov = ov_watchlist_df.join(df_overseas, on="symbol", how="left")
-        df = df_ov if df.is_empty() else pl.concat([df, df_ov], how="diagonal_relaxed")
+            # 3) 合并: 以自选列表为主表保证每行; 实时价优先, 指标/信号从日 K 并入
+            df_ov = pl.DataFrame({"symbol": overseas_symbols})
+            if df_rt is not None and not df_rt.is_empty():
+                df_ov = df_ov.join(df_rt, on="symbol", how="left")
+            if df_ind is not None and not df_ind.is_empty():
+                df_ov = df_ov.join(df_ind, on="symbol", how="left")
+            df = df_ov if df.is_empty() else pl.concat([df, df_ov], how="diagonal_relaxed")
+        except Exception:  # noqa: BLE001
+            logger.debug("海外标的指标计算失败, 降级为空行", exc_info=True)
 
     # as_of 取各类缓存中较旧者, 避免把旧的 ETF 行标成股票缓存日期
     dates = [d for d in (cache_date if stock_symbols else None, etf_date) if d is not None]

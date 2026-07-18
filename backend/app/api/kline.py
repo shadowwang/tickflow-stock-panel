@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -190,7 +190,18 @@ def get_daily(
 
     if df.is_empty():
         try:
-            raw = kline_sync.sync_daily_batch([symbol], count=days + 30)
+            # 仅当显式传入 start_date/end_date (弹窗日历场景) 才按区间实时拉取,
+            # 与本地有数据时的 get_daily_asset(symbol, start, end) 口径一致;
+            # 否则 (仅 days, 如 AI 建议卡片) 沿用原 count 条数回溯 —— 港美股经
+            # TickFlow/腾讯稳定, 区间拉取对美股不一定可用, 勿盲目切换。
+            if start_date and end_date:
+                start_dt = datetime(start.year, start.month, start.day)
+                end_dt = datetime(end.year, end.month, end.day, 23, 59, 59)
+                raw = kline_sync.sync_daily_batch([symbol], start_time=start_dt, end_time=end_dt)
+                if raw.is_empty():
+                    raw = kline_sync.sync_daily_batch([symbol], count=days + 30)
+            else:
+                raw = kline_sync.sync_daily_batch([symbol], count=days + 30)
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"TickFlow fetch failed: {e}") from e
         if raw.is_empty():
@@ -205,9 +216,19 @@ def get_daily(
         except Exception as e:  # noqa: BLE001
             logger.debug("单股除权因子拉取失败 %s: %s", symbol, e)
         enriched = compute_enriched(raw, factors=factors)
-        rows = enriched.tail(days).to_dicts()
-        # 即使 live 模式也尝试追加实时蜡烛
-        rows = _maybe_inject_live_candle(request, symbol, rows, asset_type)
+        # 显式日历区间: 按 start/end 过滤, 避免回退拉取返回超出所选期间的数据。
+        # date 列为 pl.Date 类型, 直接与 date 对象比较 (勿用字符串, 否则 dtype 不匹配)。
+        # 仅 days 模式 (无显式日期) 则保留 compute_enriched 全量, 由下方 tail 裁剪。
+        if start_date and end_date:
+            enriched = enriched.filter(
+                (pl.col("date") >= start) & (pl.col("date") <= end)
+            )
+            rows = enriched.to_dicts()
+        else:
+            rows = enriched.tail(days).to_dicts()
+        # 即使 live 模式也尝试追加实时蜡烛 (所选区间含今天才注入, 历史区间不追加今日棒)
+        if end >= date.today():
+            rows = _maybe_inject_live_candle(request, symbol, rows, asset_type)
         resp = {"symbol": symbol, "name": stock_name, "stock_info": stock_info, "rows": rows, "source": "live"}
         return _attach_ext(resp, repo, symbol, ext_columns)
 
@@ -384,7 +405,7 @@ def get_daily_batch(request: Request, body: dict):
 
     repo = request.app.state.repo
     import polars as pl
-    from datetime import date, timedelta
+    from datetime import date, datetime, timedelta
 
     end = date.today()
     start = end - timedelta(days=days * 2)  # 多取一些确保交易日够

@@ -179,9 +179,12 @@ def watchlist_enriched(
 
     # 按资产拆分自选 symbol; ETF enriched 是独立缓存, 仅自选真的含 ETF 才去加载
     # (避免无 ETF 用户在缓存冷启动时触发 ETF 全量懒加载)
+    from app.data_providers.tencent_provider import is_overseas as _is_overseas
+
     etf_set = repo.get_etf_symbol_set()
-    stock_symbols = [s for s in symbols if s not in etf_set]
+    stock_symbols = [s for s in symbols if s not in etf_set and not _is_overseas(s)]
     etf_symbols = [s for s in symbols if s in etf_set]
+    overseas_symbols = [s for s in symbols if _is_overseas(s) and s not in etf_set]
 
     df_e, cache_date = repo.get_enriched_latest()
 
@@ -210,7 +213,37 @@ def watchlist_enriched(
             df_etf = etf_watchlist_df
         df = df_etf if df.is_empty() else pl.concat([df, df_etf], how="diagonal_relaxed")
 
-    # as_of 取两类缓存中较旧者, 避免把旧的 ETF 行标成股票缓存日期
+    # 海外标的 (HK/US): enriched 缓存不含此类标的, 用腾讯实时接口补基础行情
+    df_overseas: pl.DataFrame | None = None
+    if overseas_symbols:
+        try:
+            from app.data_providers.tencent_provider import TencentProvider
+            rt_records = TencentProvider().get_realtime(symbols=overseas_symbols)
+            if rt_records:
+                _rt_rows = []
+                for r in rt_records:
+                    _rt_rows.append({
+                        "symbol": r["symbol"],
+                        "name": r.get("name"),
+                        "close": r.get("last_price"),
+                        "change_pct": r.get("change_pct"),
+                        "change_amount": r.get("change_amount"),
+                        "amount": r.get("amount"),
+                        "turnover_rate": r.get("turnover_rate"),
+                        "amplitude": r.get("amplitude"),
+                        "volume": r.get("volume"),
+                    })
+                df_overseas = pl.DataFrame(_rt_rows)
+        except Exception:  # noqa: BLE001
+            logger.debug("海外标的事实时行情获取失败, 降级为空行", exc_info=True)
+
+    if df_overseas is not None and not df_overseas.is_empty():
+        # 以自选列表为主表, 保证每个海外标的都有一行
+        ov_watchlist_df = pl.DataFrame({"symbol": overseas_symbols})
+        df_ov = ov_watchlist_df.join(df_overseas, on="symbol", how="left")
+        df = df_ov if df.is_empty() else pl.concat([df, df_ov], how="diagonal_relaxed")
+
+    # as_of 取各类缓存中较旧者, 避免把旧的 ETF 行标成股票缓存日期
     dates = [d for d in (cache_date if stock_symbols else None, etf_date) if d is not None]
     as_of = min(dates) if dates else None
     if df.is_empty():
@@ -221,8 +254,13 @@ def watchlist_enriched(
     if not df_i.is_empty() and "float_shares" in df_i.columns:
         df = df.join(df_i.select(["symbol", "float_shares"]), on="symbol", how="left")
     name_map = repo.get_name_map(df["symbol"].to_list())
+    # 名称优先用本地 instruments 名称; 海外标的 (HK/US) 无本地名称, 保留实时接口已带回的名称
+    if "name" not in df.columns:
+        df = df.with_columns(pl.lit(None, dtype=pl.Utf8).alias("name"))
     df = df.with_columns(
-        pl.col("symbol").replace_strict(name_map, default=None, return_dtype=pl.Utf8).alias("name")
+        pl.col("name").fill_null(
+            pl.col("symbol").replace_strict(name_map, default=None, return_dtype=pl.Utf8)
+        ).alias("name")
     )
 
     # 选择内置需要的列

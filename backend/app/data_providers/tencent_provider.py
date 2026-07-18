@@ -119,7 +119,9 @@ class TencentProvider:
         for s in syms:
             g = self.to_gtimg(s)
             if g:
-                gtimg_map[g] = s
+                # key 用小写, 与下方正则 group(1).lower() 对齐 (美股代码含大写字母,
+                # 如 usAAPL → usaapl, 否则大小写不匹配导致整条被丢弃)
+                gtimg_map[g.lower()] = s
                 gtimg_codes.append(g)
         if not gtimg_codes:
             return []
@@ -164,7 +166,10 @@ class TencentProvider:
         low = num(_RT["low"])
         volume_raw = num(_RT["volume"])
         amount = num(_RT["amount"])
-        turnover_rate = num(_RT["turnover_rate"])
+        # 换手率: A股/北交所腾讯实时接口返回的是百分比值 (可直接展示);
+        # 港美股该字段不可靠 (港股恒为 0, 美股格式错位), 且无流通股本无法自行计算,
+        # 故对海外标的置 None, 前端展示 "—" 而非错误数字。
+        turnover_rate = None if is_overseas(symbol) else num(_RT["turnover_rate"])
 
         # 实时传入的是项目 symbol (600519.SH / 00700.HK / AAPL.US), 需按后缀取市场,
         # 不能复用 _market_of (它吃 gtimg 代码前缀 sh/sz/...)。

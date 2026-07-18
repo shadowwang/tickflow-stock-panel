@@ -1,0 +1,20 @@
+# AKShare 免费财务数据源插件
+# 基于 AKShare 抓取东方财富公开财务数据, 无需 API Key, 用于绕过 TickFlow Expert 套餐门槛。
+# 覆盖: 核心指标 / 利润表 / 资产负债表 / 现金流量表。
+#
+# 安装依赖(后端虚拟环境):
+#   cd backend && uv pip install akshare
+# 安装后在「设置 → 数据源」点「重新加载」, 本插件即变为可用;
+# 再到「设置 → 财务数据源」选为 AKShare 免费财务, 财务分析页即解锁。
+#
+# 范围: 默认仅同步自选股(AKSHARE_FINANCIAL_SCOPE=watchlist), 避免对全市场爬取被风控。
+#       如需全量, 设 AKSHARE_FINANCIAL_SCOPE=all。
+
+name: akshare_financial
+display_name: "AKShare 免费财务(东方财富)"
+runtime: python
+entry: app.plugins.akshare_financial.provider:AKShareFinancialProvider
+check: app.plugins.akshare_financial.provider:availability
+datasets: [financial]
+description: "基于 AKShare 抓取东方财富公开财务数据, 无需 API Key。覆盖核心指标/利润表/资产负债表/现金流量表。"
+install_hint: "cd backend && uv pip install akshare"

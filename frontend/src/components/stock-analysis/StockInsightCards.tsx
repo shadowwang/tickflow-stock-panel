@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Activity, Sparkles, Newspaper, FileText, ChevronDown, ChevronUp } from 'lucide-react'
+import { Activity, Sparkles, Newspaper, FileText, ChevronDown, ChevronUp, RefreshCw } from 'lucide-react'
 import { api } from '@/lib/api'
 import { buildTechSuggestion, type Tone } from '@/lib/indicators'
-import { useHistoryReports, loadHistory, openHistoryReport, stripThinking } from '@/lib/stockAnalysisStore'
+import { useHistoryReports, loadHistory, openHistoryReport, stripThinking, startAnalysis } from '@/lib/stockAnalysisStore'
 
 interface Props {
   symbol: string
@@ -115,9 +115,6 @@ function AiCard({ symbol }: { symbol: string }) {
             </span>
             <span className="text-[11px] text-muted">置信度 {data.confidence}%</span>
           </div>
-          <div className="h-1.5 rounded-full bg-elevated overflow-hidden">
-            <div className="h-full rounded-full bg-accent" style={{ width: `${data.confidence}%` }} />
-          </div>
           <p className="text-[12px] text-foreground/90 leading-relaxed">{stripThinking(data.reason)}</p>
           <p className="text-[10px] text-muted/70">
             {data.as_of ? `数据截至 ${data.as_of}${data.close != null ? ` · 收盘 ${data.close}` : ''} · ` : ''}仅客观技术面倾向, 不构成买卖建议
@@ -166,7 +163,7 @@ function NewsCard({ symbol, name }: { symbol: string; name?: string }) {
   )
 }
 
-function ReportCard({ symbol }: { symbol: string }) {
+function ReportCard({ symbol, name }: { symbol: string; name?: string }) {
   const [showAll, setShowAll] = useState(false)
   const { reports, loaded } = useHistoryReports()
   useEffect(() => {
@@ -184,15 +181,25 @@ function ReportCard({ symbol }: { symbol: string }) {
           <FileText className="h-3.5 w-3.5 text-accent" />
           <span className="text-[12px] font-medium text-foreground">AI 分析报告</span>
         </div>
-        {list.length > 1 && (
+        <div className="flex items-center gap-2">
           <button
-            onClick={() => setShowAll((v) => !v)}
+            onClick={() => startAnalysis(symbol, name ?? '')}
             className="inline-flex items-center gap-0.5 text-[11px] text-accent hover:text-accent/80"
+            title="生成新的 AI 分析报告"
           >
-            {showAll ? '收起' : `更多(${list.length})`}
-            {showAll ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+            <RefreshCw className="h-3 w-3" />
+            分析
           </button>
-        )}
+          {list.length > 1 && (
+            <button
+              onClick={() => setShowAll((v) => !v)}
+              className="inline-flex items-center gap-0.5 text-[11px] text-accent hover:text-accent/80"
+            >
+              {showAll ? '收起' : `更多(${list.length})`}
+              {showAll ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+            </button>
+          )}
+        </div>
       </div>
       {!loaded && <CardState loading />}
       {loaded && list.length === 0 && <CardState text="暂无分析报告" />}
@@ -231,7 +238,7 @@ export function StockInsightCards({ symbol, name }: Props) {
       <TechCard symbol={symbol} />
       <AiCard symbol={symbol} />
       <NewsCard symbol={symbol} name={name} />
-      <ReportCard symbol={symbol} />
+      <ReportCard symbol={symbol} name={name} />
     </div>
   )
 }

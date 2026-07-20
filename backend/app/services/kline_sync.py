@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import polars as pl
 
+from app.data_providers.base import AssetType
 from app.indicators.pipeline import filter_halt_days
 from app.market_time import cn_now
 from app.services import preferences
@@ -551,6 +552,64 @@ def _write_minute_partition(df: pl.DataFrame, minute_dir) -> int:
     return written
 
 
+def _resolve_minute_provider(provider: str) -> tuple[object, bool, Exception | None]:
+    """解析分钟 K 应使用自定义源还是回退 TickFlow。
+
+    返回 (provider, fallback, error):
+      - fallback=True  → 无可用自定义分钟源, 调用方应回退 TickFlow
+      - error          → 解析过程抛异常(如插件注册异常), 调用方记日志并回退
+    """
+    if provider == "tickflow":
+        return None, True, None
+    from app.data_providers import custom as custom_sources
+    try:
+        has = custom_sources.provider_has_dataset(provider, "minute")
+    except Exception as e:  # noqa: BLE001
+        return None, True, e
+    return provider, not has, None
+
+
+def _try_custom_minute(
+    symbols: list[str],
+    start_time: datetime | None,
+    end_time: datetime | None,
+    asset_type: AssetType,
+    freq: str = "1m",
+    on_chunk_done: Callable[[int, int, str], None] | None = None,
+) -> tuple[pl.DataFrame | None, bool]:
+    """尝试用自定义分钟源拉取; 不可用或失败时回退 TickFlow。
+
+    返回 (df, fallback): fallback=True 表示应回退 TickFlow。
+    on_chunk_done 为上层 3 参 (cur, total, seg_label) 契约, 这里把自定义源
+    的 2 参回调包装为 3 参 (seg_label="custom")。
+    """
+    provider_name = preferences.get_minute_data_provider()
+    if provider_name == "tickflow":
+        return None, True
+    from app.data_providers import custom as custom_sources
+    if not custom_sources.provider_has_dataset(provider_name, "minute"):
+        return None, True
+    provider = custom_sources.get_provider(provider_name)
+
+    def _wrap(cur: int, total: int) -> None:
+        if on_chunk_done:
+            on_chunk_done(cur, total, "custom")
+
+    try:
+        df = provider.get_minute(
+            symbols,
+            start_time=start_time,
+            end_time=end_time,
+            asset_type=asset_type,
+            freq=freq,
+            on_chunk_done=_wrap,
+        )
+        return df, False
+    except Exception as e:  # noqa: BLE001
+        logger.warning("custom minute fetch failed (%s): %s", provider_name, e)
+        return None, True
+
+
 def sync_minute_batch(
     symbols: list[str],
     start_time: datetime | None = None,
@@ -561,6 +620,7 @@ def sync_minute_batch(
     on_chunk_done: Callable[[int, int, str], None] | None = None,
     segment_trading_days: int = 20,
     on_segment: Callable[[pl.DataFrame], None] | None = None,
+    asset_type: AssetType = "stock",
 ) -> pl.DataFrame:
     """批量拉取多股分钟 K。
 
@@ -578,16 +638,12 @@ def sync_minute_batch(
         不进入全局 out → 内存峰值从「全量」降到「单段」。适用于 sync_and_persist_minute。
         不传时 (如 get_minute_batch 的实时补拉) 保持原契约: 累积进 out 末尾一次性返回。
     """
-    # 自定义数据源分流: minute provider
-    provider_name = preferences.get_minute_data_provider()
-    if provider_name != "tickflow":
-        from app.data_providers import custom as custom_sources
-        if custom_sources.provider_has_dataset(provider_name, "minute"):
-            provider = custom_sources.get_provider(provider_name)
-            return provider.get_minute(
-                symbols, start_time=start_time, end_time=end_time, on_chunk_done=on_chunk_done,
-            )
-        # 未配置 minute → 回退 TickFlow
+    # 自定义数据源分流: minute provider (优先), 否则回退 TickFlow
+    df, fallback = _try_custom_minute(
+        symbols, start_time, end_time, asset_type, on_chunk_done=on_chunk_done,
+    )
+    if not fallback:
+        return df if df is not None else pl.DataFrame()
 
     tf = get_client()
 
@@ -668,13 +724,14 @@ def sync_minute_batch(
 def intraday_monitor_support(capset: CapabilitySet | None) -> dict[str, object]:
     """返回分时信号监控可用的数据能力和单轮标的上限。"""
     provider_name = preferences.get_minute_data_provider()
-    if provider_name != "tickflow":
-        from app.data_providers import custom as custom_sources
-        if custom_sources.provider_has_dataset(provider_name, "minute"):
-            return {
-                "available": True, "source": "custom_minute", "max_symbols": 100,
-                "reason": "使用已配置的分钟数据插件",
-            }
+    _, fallback, error = _resolve_minute_provider(provider_name)
+    if not fallback:
+        return {
+            "available": True, "source": "custom_minute", "max_symbols": 100,
+            "reason": "使用已配置的分钟数据插件",
+        }
+    if error is not None:
+        logger.warning("minute provider resolution failed while checking monitor support: %s", error)
     if capset is None:
         return {
             "available": False, "source": None, "max_symbols": 0,
@@ -760,11 +817,14 @@ def fetch_intraday_monitor_batch(
     return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
 
 
-def fetch_minute_single(symbol: str, trade_date: date) -> pl.DataFrame:
-    """从 TickFlow 实时拉取单股单日分钟 K（不写入本地）。"""
-    from datetime import datetime
+def fetch_minute_single(symbol: str, trade_date: date, asset_type: AssetType = "stock") -> pl.DataFrame:
+    """实时拉取单股单日分钟 K(不写入本地)。优先自定义分钟源, 回退 TickFlow。"""
     start_time = datetime(trade_date.year, trade_date.month, trade_date.day, 9, 25, 0)
     end_time = datetime(trade_date.year, trade_date.month, trade_date.day, 15, 5, 0)
+    # 自定义源优先
+    df, fallback = _try_custom_minute([symbol], start_time, end_time, asset_type)
+    if not fallback:
+        return df if df is not None else pl.DataFrame()
     tf = get_client()
     try:
         raw = tf.klines.batch(
@@ -987,6 +1047,7 @@ def sync_and_persist_minute(
         on_chunk_done=on_chunk_done,
         segment_trading_days=segment_days,
         on_segment=_persist,
+        asset_type="stock",
     )
 
     if written_box[0] == 0:

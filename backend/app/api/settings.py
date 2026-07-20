@@ -371,6 +371,8 @@ class DatasetConfigIn(BaseModel):
     symbols_param: str = "symbols"
     start_param: str = "start_time"
     end_param: str = "end_time"
+    asset_type_param: str | None = None
+    freq_param: str | None = None
 
 
 class AuthConfigIn(BaseModel):

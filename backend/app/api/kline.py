@@ -21,12 +21,12 @@ def _minute_allowed(capset) -> bool:
     from app.tickflow.capabilities import Cap
     if capset.has(Cap.KLINE_MINUTE_BATCH):
         return True
-    from app.services import preferences
+    from app.services import kline_sync, preferences
     provider = preferences.get_minute_data_provider()
-    if provider == "tickflow":
-        return False
-    from app.data_providers import custom as custom_sources
-    return custom_sources.provider_has_dataset(provider, "minute")
+    _, fallback, error = kline_sync._resolve_minute_provider(provider)
+    if error is not None:
+        logger.warning("minute provider resolution failed while checking access: %s", error)
+    return not fallback
 
 
 @router.get("/instruments/search")
@@ -517,22 +517,39 @@ def get_minute_batch(request: Request, body: dict):
             result[sym] = sub.to_dicts()
 
     # Step 2: 缺失的 symbol 批量实时拉取 (不落库)
+    # 本端点只接受 stock/ETF, 指数走 /api/index/minute 独立路径, 避免误路由
     if incomplete:
         start_time = datetime(trade_date.year, trade_date.month, trade_date.day, 9, 25, 0)
         end_time = datetime(trade_date.year, trade_date.month, trade_date.day, 15, 5, 0)
+        stock_incomplete = [s for s in incomplete if s not in etf_set]
+        etf_incomplete = [s for s in incomplete if s in etf_set]
+        live_parts: list[pl.DataFrame] = []
         lim = capset.limits(Cap.KLINE_MINUTE_BATCH)
-        live_df = kline_sync.sync_minute_batch(
-            incomplete,
-            start_time=start_time,
-            end_time=end_time,
-            batch_size=lim.batch if lim else None,
-            rpm=lim.rpm if lim else None,
-        )
-        if not live_df.is_empty():
-            for sym in incomplete:
-                sub = live_df.filter(pl.col("symbol") == sym).sort("datetime")
-                if not sub.is_empty():
-                    result[sym] = sub.to_dicts()
+        if stock_incomplete:
+            live_parts.append(kline_sync.sync_minute_batch(
+                stock_incomplete,
+                start_time=start_time,
+                end_time=end_time,
+                batch_size=lim.batch if lim else None,
+                rpm=lim.rpm if lim else None,
+                asset_type="stock",
+            ))
+        if etf_incomplete:
+            live_parts.append(kline_sync.sync_minute_batch(
+                etf_incomplete,
+                start_time=start_time,
+                end_time=end_time,
+                batch_size=lim.batch if lim else None,
+                rpm=lim.rpm if lim else None,
+                asset_type="etf",
+            ))
+        if live_parts:
+            live_df = pl.concat(live_parts, how="diagonal_relaxed") if len(live_parts) > 1 else live_parts[0]
+            if not live_df.is_empty():
+                for sym in incomplete:
+                    sub = live_df.filter(pl.col("symbol") == sym).sort("datetime")
+                    if not sub.is_empty():
+                        result[sym] = sub.to_dicts()
 
     return {"data": result}
 
@@ -575,7 +592,7 @@ def get_minute(
     if trade_date is None:
         # 本地无任何分钟K，尝试从 TickFlow 拉取当天
         trade_date = cn_today()
-        df = kline_sync.fetch_minute_single(symbol, trade_date)
+        df = kline_sync.fetch_minute_single(symbol, trade_date, asset_type=asset_type)
         return {
             "symbol": symbol, "name": stock_name, "stock_info": stock_info,
             "date": str(trade_date), "rows": df.to_dicts(), "source": "live",
@@ -608,8 +625,8 @@ def get_minute(
             "date": str(trade_date), "rows": df.to_dicts(), "source": "local",
         }
 
-    # 本地不完整或无数据 → 从 TickFlow 实时拉取
-    live_df = kline_sync.fetch_minute_single(symbol, trade_date)
+    # 本地不完整或无数据 → 从 TickFlow 实时拉取 (优先自定义源)
+    live_df = kline_sync.fetch_minute_single(symbol, trade_date, asset_type=asset_type)
     return {
         "symbol": symbol, "name": stock_name, "stock_info": stock_info,
         "date": str(trade_date), "rows": live_df.to_dicts(),

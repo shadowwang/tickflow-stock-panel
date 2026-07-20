@@ -140,6 +140,23 @@ start_param: start_time
 end_param: end_time
 ```
 
+### 分钟 K 区分资产类型 / 周期
+
+如果上游分钟接口需要区分股票 / ETF / 指数,或需要单独指定周期(如 `1m` / `5m`),
+可在 `minute` 数据集下配置这两个可选字段,分钟请求会自动带上对应参数:
+
+```yaml
+minute:
+  url: http://127.0.0.1:3021/minute
+  method: POST
+  asset_type_param: asset_type   # 配置后, 请求会带上 asset_type = stock / etf / index
+  freq_param: period             # 配置后, 请求会带上 period = 1m
+```
+
+- `asset_type_param`: 上游接收资产类型的参数名。配置后,分钟请求会传入当前标的类型(`stock` / `etf` / `index`)。
+- `freq_param`: 上游接收周期的参数名。配置后,分钟请求会传入 `1m`(当前固定值)。
+- 两个字段都留空则不发送这两个参数,以兼容旧数据源。
+
 ## 鉴权
 
 支持三种简单鉴权:

@@ -921,7 +921,12 @@ export function StrategyBacktest() {
   const isPending = backtestTask?.isPending ?? false
 
   const dataStatus = useDataStatus()
-  const earliestDate = dataStatus.data?.daily?.earliest_date ?? null
+  const backtestDataStatus = assetType === 'etf'
+    ? dataStatus.data?.etf_enriched
+    : dataStatus.data?.enriched
+  const earliestDate = backtestDataStatus?.earliest_date ?? null
+  const backtestDataUnavailable = dataStatus.isSuccess && !earliestDate
+  const backtestDataLabel = assetType === 'etf' ? 'ETF 指标数据' : '股票指标数据'
 
   const resetConfigFromDetail = (detail: StrategyDetail) => {
     setStrategyParams(strategyDefaultParams(detail))
@@ -981,7 +986,7 @@ export function StrategyBacktest() {
   }, [backtestTask])
 
   const handleRun = () => {
-    if (!selectedStrategy) return
+    if (!selectedStrategy || backtestDataUnavailable) return
     const requestOverrides = detail
       ? normalizeStrategyOverrides(detail, overrides)
       : overrides
@@ -1587,6 +1592,12 @@ export function StrategyBacktest() {
         </div>
         )}
 
+        {backtestDataUnavailable && (
+          <div className="rounded-btn border border-amber-400/30 bg-amber-400/10 px-3 py-2.5 text-[11px] leading-relaxed text-secondary">
+            缺少{backtestDataLabel}，请先在数据页面同步日K并完成指标计算。
+          </div>
+        )}
+
         {isPending ? (
           <button
             onClick={stopBacktest}
@@ -1672,6 +1683,12 @@ export function StrategyBacktest() {
         {backtestTask?.error && (
           <div className="text-sm text-danger bg-danger/10 border border-danger/30 rounded-btn px-3 py-2">
             {backtestTask.error}
+          </div>
+        )}
+
+        {result && (
+          <div className="rounded-btn border border-sky-400/20 bg-sky-400/5 px-3 py-2.5 text-[11px] leading-relaxed text-secondary">
+            本次回测未生成新结果，下方仍展示上一次成功结果。
           </div>
         )}
 

@@ -519,8 +519,13 @@ class QuoteService:
                 # 线程继续存活 + 分片 sleep, resume() 后即时恢复, 无需重启线程。
                 if not self._paused:
                     phase = self._market_phase()
-                    if self._should_fetch_for_phase(phase):
-                        is_final = phase in {"morning_final", "close_final"}
+                    watchlist_mode = self.realtime_mode() == "watchlist"
+                    # 自选含港美股时, 这些市场在北京时间夜间交易, 不能按 A股交易时段跳过
+                    # 轮询 —— 否则美股详情/列表在其实时时段(北京夜间)永远不刷新。
+                    overseas_watch = watchlist_mode and self._watchlist_has_overseas()
+                    if watchlist_mode and (self._should_fetch_for_phase(phase) or overseas_watch):
+                        # 含海外标的时不走 A股午休/收盘 final 定版(那是 A股 universe 的逻辑)
+                        is_final = (not overseas_watch) and phase in {"morning_final", "close_final"}
                         ok = self._fetch_quotes(final=is_final)
                         if is_final:
                             key = self._final_sync_key(phase)
@@ -964,6 +969,16 @@ class QuoteService:
 
     def _should_fetch_for_phase(self, phase: str) -> bool:
         return self._should_poll_for_phase(phase)
+
+    def _watchlist_has_overseas(self) -> bool:
+        """自选股是否含港美股 (海外标的在北京时间夜间交易, 需绕过 A股时段门控)。"""
+        try:
+            from app.services import watchlist as wl
+            from app.data_providers.tencent_provider import is_overseas
+
+            return any(is_overseas(s["symbol"]) for s in wl.list_symbols())
+        except Exception:  # noqa: BLE001
+            return False
 
     def _is_trading_hours(self) -> bool:
         """行情轮询窗口(兼容旧调用): 包含盘前预热和未完成的午休/收盘定版。"""

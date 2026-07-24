@@ -1056,6 +1056,9 @@ async def rebuild_enriched(request: Request):
                     "enriched_rows": written,
                 })
                 invalidate_storage_cache()
+                # 重建进程内 enriched 缓存: 否则概览/板块榜单仍读启动时的陈旧快照,
+                # 需要用户再手动点一次 refresh-cache 才能恢复 (与 pipeline.py 保持一致)。
+                repo.refresh_cache()
             except Exception as e:
                 logger.exception("rebuild_enriched failed: job_id=%s", job_id)
                 job_store.fail(job_id, str(e))

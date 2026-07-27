@@ -29,6 +29,52 @@ def _minute_allowed(capset) -> bool:
     return not fallback
 
 
+def _fetch_live_daily(
+    symbol: str,
+    asset_type: str,
+    start: date,
+    end: date,
+    days: int,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> "pl.DataFrame":
+    """按需实时拉取单股日K历史, 用于本地 enriched 缺失/不足时补全。
+
+    - 港美股 (overseas) 走腾讯免费 qfq 源 (TickFlow 不支持港美股日K)
+    - 其余标的走 TickFlow batch (与原逻辑一致)
+    """
+    import polars as pl
+    from app.data_providers.tencent_provider import is_overseas
+
+    if asset_type == "stock" and is_overseas(symbol):
+        from app.data_providers import resolve_provider
+        tp = resolve_provider("tencent")
+        if tp is None:
+            return pl.DataFrame()
+        if start_date and end_date:
+            tp_start = datetime(start.year, start.month, start.day)
+            tp_end = datetime(end.year, end.month, end.day, 23, 59, 59)
+        else:
+            tp_end = datetime(end.year, end.month, end.day, 23, 59, 59)
+            tp_start = tp_end - timedelta(days=days + 30)
+        try:
+            return tp.get_daily([symbol], start_time=tp_start, end_time=tp_end)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("腾讯日K拉取失败 %s: %s", symbol, e)
+            return pl.DataFrame()
+
+    # A股/其他标的: TickFlow batch
+    if start_date and end_date:
+        start_dt = datetime(start.year, start.month, start.day)
+        end_dt = datetime(end.year, end.month, end.day, 23, 59, 59)
+        raw = kline_sync.sync_daily_batch([symbol], start_time=start_dt, end_time=end_dt)
+        if raw.is_empty():
+            raw = kline_sync.sync_daily_batch([symbol], count=days + 30)
+    else:
+        raw = kline_sync.sync_daily_batch([symbol], count=days + 30)
+    return raw
+
+
 @router.get("/instruments/search")
 def search_instruments(
     request: Request,
@@ -188,20 +234,20 @@ def get_daily(
     # 从 enriched 表读取 (已含前复权 OHLCV + 技术指标 + 信号); ETF/指数走独立存储
     df = repo.get_daily_asset(asset_type, symbol, start, end)
 
-    if df.is_empty():
+    # 本地 enriched 缺失, 或港美股历史严重不足 → 按需实时拉取补全
+    # 港美股本地 enriched 通常只含当天(盘后未同步历史), 需走腾讯免费 qfq 源补历史;
+    # A股本地一般完整, 仅当完全为空时才回退 TickFlow。
+    from app.data_providers.tencent_provider import is_overseas
+    need_live = df.is_empty()
+    if not need_live and asset_type == "stock" and is_overseas(symbol):
+        # 本地交易日数远少于请求跨度 → 判定历史不足, 用腾讯补全
+        expected_min = max(2, days // 2)
+        if df.height < expected_min:
+            need_live = True
+
+    if need_live:
         try:
-            # 仅当显式传入 start_date/end_date (弹窗日历场景) 才按区间实时拉取,
-            # 与本地有数据时的 get_daily_asset(symbol, start, end) 口径一致;
-            # 否则 (仅 days, 如 AI 建议卡片) 沿用原 count 条数回溯 —— 港美股经
-            # TickFlow/腾讯稳定, 区间拉取对美股不一定可用, 勿盲目切换。
-            if start_date and end_date:
-                start_dt = datetime(start.year, start.month, start.day)
-                end_dt = datetime(end.year, end.month, end.day, 23, 59, 59)
-                raw = kline_sync.sync_daily_batch([symbol], start_time=start_dt, end_time=end_dt)
-                if raw.is_empty():
-                    raw = kline_sync.sync_daily_batch([symbol], count=days + 30)
-            else:
-                raw = kline_sync.sync_daily_batch([symbol], count=days + 30)
+            raw = _fetch_live_daily(symbol, asset_type, start, end, days, start_date, end_date)
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"TickFlow fetch failed: {e}") from e
         if raw.is_empty():
@@ -211,7 +257,8 @@ def get_daily(
         capset = getattr(request.app.state, "capabilities", None)
         try:
             from app.tickflow.capabilities import Cap
-            if capset and capset.has(Cap.ADJ_FACTOR):
+            # 港美股走腾讯 qfq 源, 数据已含前复权, 不可再用 TickFlow 除权因子二次复权
+            if capset and capset.has(Cap.ADJ_FACTOR) and not is_overseas(symbol):
                 factors = kline_sync.fetch_adj_factor_single(symbol)
         except Exception as e:  # noqa: BLE001
             logger.debug("单股除权因子拉取失败 %s: %s", symbol, e)

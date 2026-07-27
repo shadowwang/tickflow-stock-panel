@@ -104,6 +104,23 @@ class TencentProvider:
             return f"{gtimg[2:]}.{_PREFIX_TO_SUFFIX[prefix]}"
         return None
 
+    @staticmethod
+    def _gtimg_candidates(symbol: str) -> list[str]:
+        """项目 symbol → 候选 gtimg 代码列表 (按优先级)。
+
+        美股历史日K必须带交易所后缀 (usAAPL.OQ=纳斯达克, usIBM.N=纽交所...),
+        腾讯对无后缀代码只返回首尾两根; 故枚举常见后缀逐个探测, 取首个命中者。
+        港股/A股无此后缀问题, 仅返回单一代码。
+        """
+        g = TencentProvider.to_gtimg(symbol)
+        if not g:
+            return []
+        if g.startswith("us"):
+            code = g[2:]
+            suffixes = (".OQ", ".N", ".O", ".SQ", ".NMS", ".NGS")
+            return [f"us{code}{suf}" for suf in suffixes]
+        return [g]
+
     # ---------- 实时行情 ----------
     def get_realtime(
         self,
@@ -227,24 +244,40 @@ class TencentProvider:
         try:
             with httpx.Client(timeout=10.0) as client:
                 for s in symbols:
-                    g = self.to_gtimg(s)
-                    if not g:
+                    candidates = self._gtimg_candidates(s)
+                    if not candidates:
                         continue
-                    url = f"{_KLINE_URL}?param={g},day,{start},{end},{count},qfq"
-                    try:
-                        resp = client.get(url)
-                        resp.raise_for_status()
-                        data = resp.json()
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning("腾讯日K拉取失败 %s: %s", s, e)
-                        continue
-                    klines = self._extract_klines(data, g)
-                    market = _market_of(g)
-                    unit = _VOLUME_UNIT.get(market, 1)
-                    for row in klines:
-                        rec = self._parse_kline_row(s, row, unit)
-                        if rec:
-                            rows.append(rec)
+                    for g in candidates:
+                        url = f"{_KLINE_URL}?param={g},day,{start},{end},{count},qfq"
+                        try:
+                            resp = client.get(url)
+                            resp.raise_for_status()
+                            data = resp.json()
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("腾讯日K拉取失败 %s: %s", s, e)
+                            continue
+                        klines = self._extract_klines(data, g)
+                        if not klines:
+                            continue  # 该后缀无数据, 试下一个候选
+                        # 腾讯对错误交易所后缀的美股可能仅返回最新一根 (首==末) 或
+                        # 首尾残缺两根 (首根年份很早), 均视为残缺, 继续探测正确后缀
+                        if g.startswith("us"):
+                            if len(klines) == 1:
+                                continue
+                            if len(klines) < 20:
+                                try:
+                                    first_year = int(str(klines[0][0])[:4])
+                                except (ValueError, TypeError):
+                                    first_year = 0
+                                if first_year and first_year < int(start[:4]):
+                                    continue
+                        market = _market_of(g)
+                        unit = _VOLUME_UNIT.get(market, 1)
+                        for row in klines:
+                            rec = self._parse_kline_row(s, row, unit)
+                            if rec:
+                                rows.append(rec)
+                        break  # 已命中正确后缀/接口, 不再尝试其他候选
         except Exception as e:  # noqa: BLE001
             logger.warning("腾讯日K批量拉取异常: %s", e)
             return pl.DataFrame(rows) if rows else pl.DataFrame()

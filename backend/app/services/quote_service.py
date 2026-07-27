@@ -195,6 +195,10 @@ class QuoteService:
         # 午休/收盘最终同步状态: 到边界后必须成功拉取一版行情, 再进入休盘态。
         self._final_sync_done: set[tuple[date, str]] = set()
         self._final_sync_failed: dict[tuple[date, str], str] = {}
+        # 自选实时 enriched 独立缓存: 与全市场 _enriched_cache 隔离, 避免自选(尤其海外股)
+        # 写回全市场缓存后污染看板(涨幅榜/广度/情绪)。仅详情页/监控经 get_enriched_today() overlay 使用。
+        self._watchlist_enriched_cache: pl.DataFrame | None = None
+        self._watchlist_enriched_date: date | None = None
 
     # ================================================================
     # 生命周期
@@ -435,11 +439,24 @@ class QuoteService:
     def get_enriched_today(self) -> tuple[pl.DataFrame, date | None]:
         """返回今天 enriched 数据 + 日期 (线程安全)。
 
-        所有页面统一通过此方法获取实时行情 + 技术指标。
+        全市场缓存(纯净, 不含自选)叠加自选实时 enriched(独立缓存),
+        供详情页实时蜡烛注入与监控评估使用; 看板等全市场聚合只读取 repo 全市场缓存, 不被动污染。
         """
         if not self._repo:
             return pl.DataFrame(), None
-        return self._repo.get_enriched_latest()
+        base, base_date = self._repo.get_enriched_latest()
+        wl = self._watchlist_enriched_cache
+        wl_date = self._watchlist_enriched_date
+        if wl is not None and not wl.is_empty() and wl_date is not None:
+            # 仅当日期一致(同为"今天")才叠加, 避免跨日脏数据混入
+            if base_date is None or base_date == wl_date:
+                if base is None or base.is_empty():
+                    return wl, wl_date
+                merged = pl.concat([base, wl], how="diagonal_relaxed").unique(
+                    subset=["symbol", "date"], keep="last"
+                )
+                return merged, base_date or wl_date
+        return base, base_date
 
     def get_quotes_compat(self) -> pl.DataFrame:
         """兼容接口: 返回行情 DataFrame (用于盘中选股等需要 last_price/prev_close 的场景)。
@@ -778,7 +795,9 @@ class QuoteService:
                 self._repo.merge_live_daily_asset("stock", daily_df)
             except Exception as e:  # noqa: BLE001
                 logger.warning("自选实时日K写盘失败: %s", e)
-            self._flush_live_enriched(daily_df, quote_extra, asset_type="stock", merge=True)
+            # 自选 enriched 写入独立缓存 (store="watchlist"), 不回写全市场 _enriched_cache,
+            # 否则海外/自选股会污染看板(涨幅榜/广度/情绪等全市场聚合)。
+            self._flush_live_enriched(daily_df, quote_extra, asset_type="stock", store="watchlist")
 
         self._broadcast_quote_updated()
         self._evaluate_monitors(daily_df, quote_extra)
@@ -1352,7 +1371,7 @@ class QuoteService:
     # enriched 增量计算
     # ================================================================
 
-    def _flush_live_enriched(self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame = None, asset_type: str = "stock", merge: bool = False) -> None:
+    def _flush_live_enriched(self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame = None, asset_type: str = "stock", merge: bool = False, store: str = "repo") -> None:
         """增量计算今天的 enriched: 用昨天的递推状态 + 今天 OHLCV → 只算今天 5500 行。
 
         quote_extra: API 直接提供的补充字段 (prev_close, change_pct 等),
@@ -1448,7 +1467,14 @@ class QuoteService:
                 return
 
             # ---- 写盘 + 更新缓存 ----
-            if merge:
+            if store == "watchlist":
+                # 自选实时 enriched 存入独立缓存, 不写全市场缓存/盘, 避免污染看板。
+                # 详情页/监控经 get_enriched_today() overlay 读取。
+                with self._lock:
+                    self._watchlist_enriched_cache = enriched_today
+                    self._watchlist_enriched_date = enriched_today["date"][0] if "date" in enriched_today.columns and not enriched_today.is_empty() else None
+                logger.info("自选 enriched 缓存更新(隔离): %d 只", len(enriched_today))
+            elif merge:
                 self._repo.merge_live_enriched_asset(asset_type, enriched_today)
             else:
                 self._repo.flush_live_enriched_asset(asset_type, enriched_today)

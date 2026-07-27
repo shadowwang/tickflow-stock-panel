@@ -401,6 +401,12 @@ def build_market_overview(
         }
 
     df = svc._load_enriched_for_date(as_of)
+    # 仅保留 A股标的池: 排除自选实时写入的海外股(美股/港股)等不在 instruments 中的标的,
+    # 避免其污染排行榜/广度/成交额等全市场聚合。即便 enriched 缓存或磁盘分区残留历史污染也安全。
+    inst = repo.get_instruments_asset("stock")
+    if inst is not None and not inst.is_empty() and "symbol" in inst.columns:
+        valid_syms = set(inst["symbol"].cast(pl.Utf8).to_list())
+        df = df.filter(pl.col("symbol").cast(pl.Utf8).is_in(valid_syms))
     if df.is_empty():
         rows: list[dict] = []
     else:

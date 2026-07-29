@@ -244,6 +244,8 @@ export interface StockSuggestResult {
   as_of?: string
   /** 数据基准: 最新收盘价 */
   close?: number | null
+  /** 方向判断解释: 支持/反对证据、风险限制与不可外推事项(基于固定样本 + 规则信号) */
+  explanation?: string
 }
 
 // ===== Watchlist =====

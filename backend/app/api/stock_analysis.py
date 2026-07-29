@@ -257,6 +257,29 @@ _SUGGEST_USER = """标的标准代码: {symbol}
 ```
 请输出 JSON。"""
 
+# 第二轮(解释): 在第一轮方向判断基础上, 让 LLM 解释"系统为何给出该方向判断",
+# 列出支持/反对证据、风险限制与不可外推事项, 且不生成任何真实订单/实盘指令。
+_SUGGEST_EXPLAIN_SYSTEM = """你是一位严谨的 A 股技术分析师。基于已给出的技术面倾向判断与原始数据,向用户解释"系统为何给出该方向判断"。
+
+要求:
+- 用简体中文、Markdown 小段落输出,总字数控制在 300 字以内。
+- 必须依次列出:①支持该方向判断的证据(逐项引用具体指标数值,如 MACD 金叉、RSI 超买、站上 20 日线);②反对该方向判断的证据(反向信号 / 风险点);③风险限制(样本期、适用条件、失效情形);④不能外推的事项(如历史规律不代表未来、单一样本不代表整体、技术面不反映基本面)。
+- 绝对不生成任何真实订单、不给出买卖点、不加仓减仓等实盘执行指令;只做客观解释。
+- 引用的任何价格 / 指标数值必须与下方提供的数据逐字一致,禁止编造或凭印象估算。
+
+现在请基于下方数据解释。"""
+
+_SUGGEST_EXPLAIN_USER = """标的: {symbol}
+系统给出的方向判断: {direction}(置信度 {confidence}%)
+判断理由: {reason}
+
+固定样本(最近 {n} 个交易日日 K,含技术指标,升序,最后一行即最新交易日):
+```json
+{kline}
+```
+
+请解释系统为何给出"{direction}"这一方向判断,列出支持证据、反对证据、风险限制和不能外推的事项。不生成真实订单或实盘执行指令。"""
+
 
 def _suggest_rows(df: pl.DataFrame, cols: list[str], n: int) -> list[dict]:
     """取尾部 N 行并序列化为 JSON 安全的 dict 列表(date→str, NaN→None)。"""
@@ -287,6 +310,42 @@ def _strip_think(text: str) -> str:
         text or "",
         flags=re.DOTALL | re.IGNORECASE,
     ).strip()
+
+
+async def _build_explanation(symbol: str, result: dict, kline_tail: list[dict]) -> str:
+    """第二轮 LLM 调用: 基于首轮方向判断 + 固定样本, 解释"系统为何给出该方向判断"。
+
+    失败或首轮无有效判断时返回空串(卡片仍正常显示首轮结果)。
+    """
+    fail_prefixes = ("AI 未返回", "AI 返回", "AI 建议生成失败", "AI 未配置", "暂无日 K")
+    reason = result.get("reason", "")
+    if not reason or reason.startswith(fail_prefixes):
+        return ""
+    explain_user = _SUGGEST_EXPLAIN_USER.format(
+        symbol=symbol,
+        direction=result.get("direction", "中性"),
+        confidence=result.get("confidence", 0),
+        reason=reason,
+        n=len(kline_tail),
+        kline=json.dumps(kline_tail, ensure_ascii=False),
+    )
+    try:
+        from app.services.ai_provider import stream_ai_text
+
+        parts: list[str] = []
+        async for delta in stream_ai_text(
+            [
+                {"role": "system", "content": _SUGGEST_EXPLAIN_SYSTEM},
+                {"role": "user", "content": explain_user},
+            ],
+            temperature=0.3,
+            max_tokens=1200,
+        ):
+            parts.append(delta)
+        return _strip_think("".join(parts))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("suggest explanation failed for %s: %s", symbol, e)
+        return ""
 
 
 def _parse_suggest_json(text: str) -> dict:
@@ -378,4 +437,5 @@ async def suggest_stock(
     result["symbol"] = symbol
     result["as_of"] = as_of
     result["close"] = close
+    result["explanation"] = await _build_explanation(symbol, result, kline_tail)
     return result

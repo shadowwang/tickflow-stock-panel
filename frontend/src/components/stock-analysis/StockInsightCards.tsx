@@ -116,6 +116,12 @@ function AiCard({ symbol }: { symbol: string }) {
             <span className="text-[11px] text-muted">置信度 {data.confidence}%</span>
           </div>
           <p className="text-[12px] text-foreground/90 leading-relaxed">{stripThinking(data.reason)}</p>
+          {data.explanation && (
+            <div className="mt-2 pt-2 border-t border-border/40">
+              <div className="text-[11px] text-muted mb-1">为何给出该倾向</div>
+              <p className="text-[12px] text-foreground/85 leading-relaxed whitespace-pre-wrap">{stripThinking(data.explanation)}</p>
+            </div>
+          )}
           <p className="text-[10px] text-muted/70">
             {data.as_of ? `数据截至 ${data.as_of}${data.close != null ? ` · 收盘 ${data.close}` : ''} · ` : ''}仅客观技术面倾向, 不构成买卖建议
           </p>
